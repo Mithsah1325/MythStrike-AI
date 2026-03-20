@@ -1,11 +1,13 @@
 from fastmcp import FastMCP
 import subprocess
-import shlex
 import re
+import sys
+import os
+from openai import OpenAI
+from dotenv import load_dotenv
 
+# ------------------ MCP SETUP ------------------
 
-# Initialize the MCPP Server
-# Creates your MCP server instance with name "Security-Arsenal"
 mcp = FastMCP("Security-Arsenal")
 
 def is_valid_target(target):
@@ -13,16 +15,12 @@ def is_valid_target(target):
 
 
 @mcp.tool()
-def run_nmap(target: str) -> str:
-    """
-    Run a fast Nmap scan to find open port.
-    Target can be IP (192.168.1.1) or hostname (example.com)
-    """
-    # -F is a "Fast mode" (scans fewer ports)
+def run_nmap(target: str) -> dict:
     if not is_valid_target(target):
         return {"error": "Invalid target format"}
-    
+
     command = ["nmap", "-F", target]
+
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=300)
         return {
@@ -31,20 +29,15 @@ def run_nmap(target: str) -> str:
             "output": result.stdout,
             "error": result.stderr
         }
-    
     except Exception as e:
-        return {"error": f"Nmap Error: {str(e)}"}
+        return {"error": str(e)}
 
 
 @mcp.tool()
-def run_nuclei(target_url: str) -> str:
-    """
-    Run Nuclei vulnerability scanner against a URL.
-    """
-    # -silent removes branding/banner to make the output easier for AI to read
+def run_nuclei(target_url: str) -> dict:
     if not is_valid_target(target_url):
-        return {"error": "Invalid URL format"}
-    
+        return {"error": "Invalid URL"}
+
     command = ["nuclei", "-u", target_url, "-silent"]
 
     try:
@@ -55,16 +48,17 @@ def run_nuclei(target_url: str) -> str:
             "output": result.stdout,
             "error": result.stderr
         }
-    
     except Exception as e:
-         return {"error": f"Nuclei Error: {str(e)}"}
-    
+        return {"error": str(e)}
+
+
 @mcp.tool()
-def manual_probe_headers(url: str) -> str:
-    """
-    Uses Curl to fetch HTTP headers to identify server tech.
-    """
+def manual_probe_headers(url: str) -> dict:
+    if not is_valid_target(url):
+        return {"error": "Invalid URL"}
+
     command = ["curl", "-I", url]
+
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30)
         return {
@@ -73,10 +67,105 @@ def manual_probe_headers(url: str) -> str:
             "headers": result.stdout,
             "error": result.stderr
         }
-    
     except Exception as e:
-         return {"error": f"Curl Error: {str(e)}"}
+        return {"error": str(e)}
 
-# Run this code only when the file is executed directly.
+
+# ------------------ AI AGENT ------------------
+
+load_dotenv()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+SYSTEM_PROMPT = """
+You are a cybersecurity AI agent.
+
+Available tools:
+- run_nmap(target)
+- run_nuclei(url)
+- manual_probe_headers(url)
+
+Rules:
+- Start with nmap
+- If HTTP/HTTPS found → use curl
+- If web detected → use nuclei
+
+Respond ONLY in this format:
+
+THOUGHT: ...
+ACTION: ...
+INPUT: ...
+"""
+
+def ask_llm(prompt):
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    return response.choices[0].message.content
+
+
+def parse_response(response):
+    lines = response.split("\n")
+    thought = action = input_value = ""
+
+    for line in lines:
+        if line.startswith("THOUGHT:"):
+            thought = line.replace("THOUGHT:", "").strip()
+        elif line.startswith("ACTION:"):
+            action = line.replace("ACTION:", "").strip()
+        elif line.startswith("INPUT:"):
+            input_value = line.replace("INPUT:", "").strip()
+
+    return thought, action, input_value
+
+
+def execute_action(action, input_value):
+    if action == "run_nmap":
+        return run_nmap(input_value)
+    elif action == "run_nuclei":
+        return run_nuclei(input_value)
+    elif action == "manual_probe_headers":
+        return manual_probe_headers(input_value)
+    else:
+        return {"error": "Unknown action"}
+
+
+def run_agent():
+    user_input = input("Enter target (example.com): ")
+
+    prompt = f"Scan target: {user_input}"
+
+    for step in range(3):
+        print(f"\n--- Step {step+1} ---")
+
+        llm_response = ask_llm(prompt)
+        print("\nLLM Response:\n", llm_response)
+
+        thought, action, input_value = parse_response(llm_response)
+
+        print(f"\n[THOUGHT]: {thought}")
+        print(f"[ACTION]: {action}")
+        print(f"[INPUT]: {input_value}")
+
+        result = execute_action(action, input_value)
+
+        print(f"\n[RESULT]: {result}")
+
+        prompt = f"""
+        Previous result:
+        {result}
+
+        What next?
+        """
+
+
+# ------------------ ENTRY POINT ------------------
+
 if __name__ == "__main__":
-    mcp.run()
+    if len(sys.argv) > 1 and sys.argv[1] == "agent":
+        run_agent()
+    else:
+        mcp.run()
