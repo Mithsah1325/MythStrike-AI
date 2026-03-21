@@ -1,45 +1,84 @@
-# This file create code all about langraph
+from typing import List, TypedDict
+from langgraph.graph import StateGraph, END
 
-from typing import TypedDict, List
+# Import your real tools from your first file
+from mcp_server import run_nmap, run_nuclei, run_sqlmap, run_subfinder, manual_probe_headers, run_ffuf
 
-class AgentState(TypeDict):
+class AgentState(TypedDict):
     target: str
+    subdomains: List[str]
     recon_results: str
     vulnerabilities_report: str
 
+# --- 2. The Agents (Now using REAL tools) ---
 
 def recon_agent(state: AgentState):
-    print(f"-- RECON AGENT: Scanning {state['target']} --")
-    # We call the existing nmap function here
-    # For now, let's assume it returns the nmap text
-    result = "Nmap scan: Port 80 is open, Port 443 is open"
-    return {"recon_reults": result}
+    target = state['target']
+    
+    # 1. Find Subdomains first
+    sub_data = run_subfinder(target)
+    sub_list = sub_data.get("output", "").strip().split("\n")
+    print(f"[Scout]: Found {len(sub_list)} subdomains.")
+
+    # 2. Run Nmap on the main target
+    nmap_data = run_nmap(target)
+    scan_text = nmap_data.get("output", "")
+    
+    return {
+        "subdomains": sub_list,
+        "recon_results": scan_text
+    }
 
 def analyst_agent(state: AgentState):
-    print(f"--- ANALYST AGENT: Reviewing results ---")
-    recon_data = state["recon_results"]
+    recon_data = state["recon_results"].lower() # Convert to lowercase to make matching easier
+    target = state["target"]
+    url = f"http://{target}"
     
-    if "80" in recon_data or "443" in recon_data:
-        report = "Web ports found. Running Nuclei scan..."
-        # Here you would call run_nuclei()
-    else:
-        report = "No web services found. Scan complete."
+    print(f"[Analyst]: 🧠 Analyzing findings for {target}...")
+
+    # 1. Check for Database/Injection triggers (SQLMap)
+    if any(x in recon_data for x in ["sql", "mysql", "postgre", "php", "id="]):
+        print("[Analyst]: 🎯 Database signatures detected. Launching SQLMap...")
+        result = run_sqlmap(url)
+    
+    # 2. Check for Web triggers (ffuf or Nuclei)
+    elif any(x in recon_data for x in ["80/tcp", "443/tcp", "http", "apache", "nginx"]):
+        print("[Analyst]: 🔎 Web server confirmed. Starting Directory Discovery (ffuf)...")
         
-    return {"vulnerability_report": report}
+        # Run ffuf first to find hidden paths
+        ffuf_result = run_ffuf(url)
+        
+        # Now pass the findings to Nuclei for vulnerability scanning
+        print("[Analyst]: 🛡️ Running Nuclei to check for known exploits...")
+        nuclei_result = run_nuclei(url)
+        
+        # Combine the results for the final report
+        report = f"--- FFUF RESULTS ---\n{ffuf_result.get('output')}\n\n--- NUCLEI RESULTS ---\n{nuclei_result.get('output')}"
+        return {"vulnerabilities_report": report}
+    
+    else:
+        # Fallback: If Nmap missed it but we think it's a website, run a quick check
+        print("[Analyst]: ⚠️ No clear web ports in Nmap, but trying Nuclei anyway as a backup...")
+        result = run_nuclei(url)
 
-from langgraph.graph import StateGraph, END
+    return {"vulnerabilities_report": result.get("output", "No results found.")}
 
-# 1. Create the Graph
+# --- 3. The Graph (Stays the same) ---
 workflow = StateGraph(AgentState)
-
-# 2. Add our "Nodes" (The Agents)
 workflow.add_node("scout", recon_agent)
 workflow.add_node("analyst", analyst_agent)
-
-# 3. Connect them
 workflow.set_entry_point("scout")
 workflow.add_edge("scout", "analyst")
 workflow.add_edge("analyst", END)
-
-# 4. Compile it
 app = workflow.compile()
+
+if __name__ == "__main__":
+    user_target = input("Enter a target (e.g., scanme.nmap.org): ")
+    initial_state = {"target": user_target, "subdomains": [], "recon_results": "", "vulnerabilities_report": ""}
+    
+    final_output = app.invoke(initial_state)
+    
+    print("\n" + "="*30)
+    print("       FINAL SECURITY REPORT")
+    print("="*30)
+    print(final_output["vulnerabilities_report"])

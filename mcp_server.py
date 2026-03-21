@@ -93,6 +93,23 @@ def run_sqlmap(url: str) -> dict:
     except Exception as e:
         return {"error": str(e)}   
 
+# Added ffuff tool for fuzzing
+@mcp.tool()
+def run_ffuf(target_url: str, wordlist_path: str = "common.txt") -> dict:
+    print(f"--- [FUZZ] Brute-forcing directories on {target_url} ---")
+    
+    # -u is the URL, FUZZ is the keyword ffuf replaces with words from the list
+    # -mc 200 tells it to only show successful pages (status 200)
+    command = ["ffuf", "-u", f"{target_url}/FUZZ", "-w", wordlist_path, "-mc", "200", "-s"]
+    
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        return {
+            "tool": "ffuf",
+            "output": result.stdout
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 # ------------------ AI AGENT ------------------
 
