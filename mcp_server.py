@@ -69,6 +69,29 @@ def manual_probe_headers(url: str) -> dict:
         }
     except Exception as e:
         return {"error": str(e)}
+    
+#Added subfinder and sqlmap tools
+@mcp.tool()
+def run_subfinder(domain: str) -> dict:
+    print(f"[RECON] Finding subdomains for {domain}")
+    # -silent keeps the output clean for the AI
+    command = ["subfinder", "-d", domain, "-silent"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        return {"tool": "subfinder", "output": result.stdout}
+    except Exception as e:
+        return {"error": str(e)}
+    
+@mcp.tool()
+def run_sqlmap(url: str) -> dict:
+    print(f"--- [EXPLOIT] Checking for SQL Injection on {url} ---")
+    # --batch tells sqlmap not to ask the AI questions (it chooses default 'yes')
+    command = ["sqlmap", "-u", url, "--batch", "--random-agent", "--level=1"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+        return {"tool": "sqlmap", "output": result.stdout}
+    except Exception as e:
+        return {"error": str(e)}   
 
 
 # ------------------ AI AGENT ------------------
@@ -83,7 +106,7 @@ Available tools:
 - run_nmap(target)
 - run_nuclei(url)
 - manual_probe_headers(url)
-
+- run_subfinder(domain)
 Rules:
 - Start with nmap
 - If HTTP/HTTPS found → use curl
