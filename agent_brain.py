@@ -1,4 +1,5 @@
 from typing import List, TypedDict
+import requests
 from langgraph.graph import StateGraph, END
 
 
@@ -30,28 +31,30 @@ def recon_agent(state: AgentState):
         "subdomains": sub_list,
         "recon_results": scan_text
     }
-
+# Analyst Agent
 def analyst_agent(state: AgentState):
     recon_data = state["recon_results"].lower() # Convert to lowercase to make matching easier
     target = state["target"]
     url = f"http://{target}"
     
-    print(f"[Analyst]: 🧠 Analyzing findings for {target}...")
+    print(f"[Analyst]: Analyzing findings for {target}...")
 
     # 1. Check for Database/Injection triggers (SQLMap)
-    if any(x in recon_data for x in ["sql", "mysql", "postgre", "php", "id="]):
-        print("[Analyst]: 🎯 Database signatures detected. Launching SQLMap...")
+    if any(x in recon_data for x in ["sqli", "sql", "injection", "database", "mysql", "postgre", "php", "id="]):
+        print("[Analyst]: Database signatures detected. Launching SQLMap...")
         result = run_sqlmap(url)
+        report = result.get("output", "")
+        return {"vulnerabilities_report": report}
     
     # 2. Check for Web triggers (ffuf or Nuclei)
     elif any(x in recon_data for x in ["80/tcp", "443/tcp", "http", "apache", "nginx"]):
-        print("[Analyst]: 🔎 Web server confirmed. Starting Directory Discovery (ffuf)...")
+        print("[Analyst]: Web server confirmed. Starting Directory Discovery (ffuf)...")
         
         # Run ffuf first to find hidden paths
         ffuf_result = run_ffuf(url)
         
         # Now pass the findings to Nuclei for vulnerability scanning
-        print("[Analyst]: 🛡️ Running Nuclei to check for known exploits...")
+        print("[Analyst]: Running Nuclei to check for known exploits...")
         nuclei_result = run_nuclei(url)
         
         # Combine the results for the final report
@@ -60,14 +63,15 @@ def analyst_agent(state: AgentState):
     
     else:
         # Fallback: If Nmap missed it but we think it's a website, run a quick check
-        print("[Analyst]: ⚠️ No clear web ports in Nmap, but trying Nuclei anyway as a backup...")
+        print("[Analyst]: No clear web ports in Nmap, but trying Nuclei anyway as a backup...")
         result = run_nuclei(url)
+        return {"vulnerabilities_report": result.get("output", "No results found.")}
 
-    return {"vulnerabilities_report": result.get("output", "No results found.")}
 
+# import requests
 
-# Proof-of-Concept (PoC) Validation Engine
-# This agent takes the vulnerabilities report and tries to validate them with safe, non-destructive tests.
+# 4. PoC Agent (Safe Validation)
+# -------------------------------
 def poc_agent(state: AgentState):
     report = state["vulnerabilities_report"]
     target = state["target"]
@@ -76,58 +80,83 @@ def poc_agent(state: AgentState):
     print("[PoC Agent]: 🧪 Validating vulnerabilities...")
 
     findings = []
+    lines = report.split("\n")
 
-    # --- SQL Injection Validation ---
-    if "sql" in report.lower() or "injection" in report.lower():
+    # 4.1 SQL Injection Validation
+    if any(x in report.lower() for x in ["sqli", "sql", "injection", "database"]):
         print("[PoC Agent]: Testing for SQL Injection...")
-
         try:
             normal = requests.get(url, timeout=5).text
             true_case = requests.get(url + "?id=1 AND 1=1", timeout=5).text
             false_case = requests.get(url + "?id=1 AND 1=2", timeout=5).text
 
             if true_case == normal and false_case != normal:
-                findings.append("✅ VERIFIED SQL Injection (Boolean-based)")
+                findings.append("[HIGH] VERIFIED SQL Injection (Boolean-based)")
             else:
-                findings.append("❌ SQL Injection not confirmed")
-
+                findings.append("[MEDIUM] SQL Injection not confirmed")
         except Exception as e:
-            findings.append(f"⚠️ SQLi test failed: {str(e)}")
+            findings.append(f"[ERROR] SQLi test failed: {str(e)}")
 
-    # --- Basic Header Check (Safe PoC) ---
+    # 4.2 Header Security Validation
     try:
         res = requests.get(url, timeout=5)
         headers = res.headers
 
         if "X-Frame-Options" not in headers:
-            findings.append("⚠️ Missing X-Frame-Options header (Clickjacking risk)")
-
+            findings.append("[LOW] Missing X-Frame-Options (Clickjacking risk)")
         if "Content-Security-Policy" not in headers:
-            findings.append("⚠️ Missing CSP header")
-
+            findings.append("[LOW] Missing CSP header")
+        if "Strict-Transport-Security" not in headers:
+            findings.append("[LOW] Missing HSTS header")
+        if "X-Content-Type-Options" not in headers:
+            findings.append("[LOW] Missing X-Content-Type-Options")
     except Exception as e:
-        findings.append(f"⚠️ Header check failed: {str(e)}")
+        findings.append(f"[ERROR] Header check failed: {str(e)}")
+
+    # 4.3 Parse Nuclei Findings
+    # SSH Issues
+    if any("ssh" in line.lower() for line in lines):
+        findings.append("[MEDIUM] SSH service exposed (Port 22)")
+        findings.append("[MEDIUM] Weak SSH algorithms detected (per scan)")
+
+    # CVEs
+    for line in lines:
+        if "CVE-" in line:
+            findings.append(f"[HIGH] Potential CVE Detected → {line.strip()}")
+
+    # Apache Detection
+    if "apache" in report.lower():
+        findings.append("[INFO] Apache server detected — verify version is up-to-date")
+
+    # Open Ports Insight
+    if "open" in report.lower():
+        findings.append("[INFO] Open ports detected — review exposed services")
+
+    # Fallback
+    if not findings:
+        findings.append("[INFO] No actionable PoC validations performed.")
 
     return {
-        "poc_results": "\n".join(findings) if findings else "No PoC validations performed."
+        "poc_results": findings  # structured output
     }
+
 
 # --- 3. The Graph (UPDATED WITH PoC AGENT) ---
 workflow = StateGraph(AgentState)
 
 workflow.add_node("scout", recon_agent)
 workflow.add_node("analyst", analyst_agent)
-workflow.add_node("poc", poc_agent)  # 👈 NEW NODE
+workflow.add_node("poc", poc_agent)  # NEW NODE
 
 workflow.set_entry_point("scout")
 
 workflow.add_edge("scout", "analyst")
-workflow.add_edge("analyst", "poc")  # 👈 analyst → poc
-workflow.add_edge("poc", END)        # 👈 poc → end
+workflow.add_edge("analyst", "poc")  # analyst → poc
+workflow.add_edge("poc", END)        # poc → end
 
 app = workflow.compile()
 
-
+# Main Execution
 if __name__ == "__main__":
     user_target = input("Enter a target (e.g., scanme.nmap.org): ")
 
@@ -136,7 +165,7 @@ if __name__ == "__main__":
         "subdomains": [],
         "recon_results": "",
         "vulnerabilities_report": "",
-        "poc_results": ""   # 👈 IMPORTANT (new state field)
+        "poc_results": ""   # IMPORTANT (new state field)
     }
 
     final_output = app.invoke(initial_state)
@@ -149,4 +178,5 @@ if __name__ == "__main__":
     print(final_output["vulnerabilities_report"])
 
     print("\n--- PoC Validation ---")
-    print(final_output["poc_results"])
+for item in final_output["poc_results"]:
+    print(item)
