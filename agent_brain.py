@@ -1,6 +1,7 @@
 from typing import List, TypedDict
 from langgraph.graph import StateGraph, END
 
+
 # Import your real tools from your first file
 from mcp_server import run_nmap, run_nuclei, run_sqlmap, run_subfinder, manual_probe_headers, run_ffuf
 
@@ -9,6 +10,7 @@ class AgentState(TypedDict):
     subdomains: List[str]
     recon_results: str
     vulnerabilities_report: str
+    poc_results: str
 
 # --- 2. The Agents (Now using REAL tools) ---
 
@@ -63,22 +65,88 @@ def analyst_agent(state: AgentState):
 
     return {"vulnerabilities_report": result.get("output", "No results found.")}
 
-# --- 3. The Graph (Stays the same) ---
+
+# Proof-of-Concept (PoC) Validation Engine
+# This agent takes the vulnerabilities report and tries to validate them with safe, non-destructive tests.
+def poc_agent(state: AgentState):
+    report = state["vulnerabilities_report"]
+    target = state["target"]
+    url = f"http://{target}"
+
+    print("[PoC Agent]: 🧪 Validating vulnerabilities...")
+
+    findings = []
+
+    # --- SQL Injection Validation ---
+    if "sql" in report.lower() or "injection" in report.lower():
+        print("[PoC Agent]: Testing for SQL Injection...")
+
+        try:
+            normal = requests.get(url, timeout=5).text
+            true_case = requests.get(url + "?id=1 AND 1=1", timeout=5).text
+            false_case = requests.get(url + "?id=1 AND 1=2", timeout=5).text
+
+            if true_case == normal and false_case != normal:
+                findings.append("✅ VERIFIED SQL Injection (Boolean-based)")
+            else:
+                findings.append("❌ SQL Injection not confirmed")
+
+        except Exception as e:
+            findings.append(f"⚠️ SQLi test failed: {str(e)}")
+
+    # --- Basic Header Check (Safe PoC) ---
+    try:
+        res = requests.get(url, timeout=5)
+        headers = res.headers
+
+        if "X-Frame-Options" not in headers:
+            findings.append("⚠️ Missing X-Frame-Options header (Clickjacking risk)")
+
+        if "Content-Security-Policy" not in headers:
+            findings.append("⚠️ Missing CSP header")
+
+    except Exception as e:
+        findings.append(f"⚠️ Header check failed: {str(e)}")
+
+    return {
+        "poc_results": "\n".join(findings) if findings else "No PoC validations performed."
+    }
+
+# --- 3. The Graph (UPDATED WITH PoC AGENT) ---
 workflow = StateGraph(AgentState)
+
 workflow.add_node("scout", recon_agent)
 workflow.add_node("analyst", analyst_agent)
+workflow.add_node("poc", poc_agent)  # 👈 NEW NODE
+
 workflow.set_entry_point("scout")
+
 workflow.add_edge("scout", "analyst")
-workflow.add_edge("analyst", END)
+workflow.add_edge("analyst", "poc")  # 👈 analyst → poc
+workflow.add_edge("poc", END)        # 👈 poc → end
+
 app = workflow.compile()
+
 
 if __name__ == "__main__":
     user_target = input("Enter a target (e.g., scanme.nmap.org): ")
-    initial_state = {"target": user_target, "subdomains": [], "recon_results": "", "vulnerabilities_report": ""}
-    
+
+    initial_state = {
+        "target": user_target,
+        "subdomains": [],
+        "recon_results": "",
+        "vulnerabilities_report": "",
+        "poc_results": ""   # 👈 IMPORTANT (new state field)
+    }
+
     final_output = app.invoke(initial_state)
-    
+
     print("\n" + "="*30)
     print("       FINAL SECURITY REPORT")
     print("="*30)
+
+    print("\n--- Vulnerability Scan ---")
     print(final_output["vulnerabilities_report"])
+
+    print("\n--- PoC Validation ---")
+    print(final_output["poc_results"])
