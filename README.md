@@ -18,7 +18,9 @@ This project is designed for security research and automation on systems you are
 	- Interactive LLM loop (`mcp_server.py agent`)
 	- LangGraph multi-step workflow (`agent_brain.py`)
 
+## Report
 ![alt text](report/report1.png)
+![alt text](report/report2.png)
 
 ## Project Structure
 

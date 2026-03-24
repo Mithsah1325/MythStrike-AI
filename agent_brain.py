@@ -1,4 +1,5 @@
 from typing import List, TypedDict
+import re
 import requests
 from langgraph.graph import StateGraph, END
 
@@ -52,13 +53,16 @@ def analyst_agent(state: AgentState):
         
         # Run ffuf first to find hidden paths
         ffuf_result = run_ffuf(url)
+        ffuf_output = ffuf_result.get("output", "").strip()
+        if not ffuf_output or ffuf_output.lower() == "none":
+            ffuf_output = "No directories discovered"
         
         # Now pass the findings to Nuclei for vulnerability scanning
         print("[Analyst]: Running Nuclei to check for known exploits...")
         nuclei_result = run_nuclei(url)
         
         # Combine the results for the final report
-        report = f"--- FFUF RESULTS ---\n{ffuf_result.get('output')}\n\n--- NUCLEI RESULTS ---\n{nuclei_result.get('output')}"
+        report = f"--- FFUF RESULTS ---\n{ffuf_output}\n\n--- NUCLEI RESULTS ---\n{nuclei_result.get('output')}"
         return {"vulnerabilities_report": report}
     
     else:
@@ -70,6 +74,18 @@ def analyst_agent(state: AgentState):
 
 # import requests
 
+def sort_findings(findings):
+    order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "INFO": 3}
+    return sorted(findings, key=lambda x: order.get(x.split("]")[0][1:], 99))
+
+def generate_poc_hint(cve_id: str, target: str, url: str) -> str:
+    cve_key = cve_id.upper()
+
+    if cve_key == "CVE-2023-48795":
+        return f"run 'nmap -p 22 --script ssh2-enum-algos {target}'"
+
+    return f"run 'nuclei -u {url} -silent -tags cve'"
+
 # 4. PoC Agent (Safe Validation)
 # -------------------------------
 def poc_agent(state: AgentState):
@@ -77,7 +93,7 @@ def poc_agent(state: AgentState):
     target = state["target"]
     url = f"http://{target}"
 
-    print("[PoC Agent]: 🧪 Validating vulnerabilities...")
+    print("[PoC Agent]: Validating vulnerabilities...")
 
     findings = []
     lines = report.split("\n")
@@ -97,21 +113,22 @@ def poc_agent(state: AgentState):
         except Exception as e:
             findings.append(f"[ERROR] SQLi test failed: {str(e)}")
 
-    # 4.2 Header Security Validation
-    try:
-        res = requests.get(url, timeout=5)
-        headers = res.headers
+    # 4.2 Header Security Validation (only if Nuclei flags missing headers)
+    if "missing-security-headers" in report.lower():
+        try:
+            res = requests.get(url, timeout=5)
+            headers = res.headers
 
-        if "X-Frame-Options" not in headers:
-            findings.append("[LOW] Missing X-Frame-Options (Clickjacking risk)")
-        if "Content-Security-Policy" not in headers:
-            findings.append("[LOW] Missing CSP header")
-        if "Strict-Transport-Security" not in headers:
-            findings.append("[LOW] Missing HSTS header")
-        if "X-Content-Type-Options" not in headers:
-            findings.append("[LOW] Missing X-Content-Type-Options")
-    except Exception as e:
-        findings.append(f"[ERROR] Header check failed: {str(e)}")
+            if "X-Frame-Options" not in headers:
+                findings.append("[LOW] Missing X-Frame-Options (Clickjacking risk)")
+            if "Content-Security-Policy" not in headers:
+                findings.append("[LOW] Missing CSP header")
+            if "Strict-Transport-Security" not in headers:
+                findings.append("[LOW] Missing HSTS header")
+            if "X-Content-Type-Options" not in headers:
+                findings.append("[LOW] Missing X-Content-Type-Options")
+        except Exception as e:
+            findings.append(f"[ERROR] Header check failed: {str(e)}")
 
     # 4.3 Parse Nuclei Findings
     # SSH Issues
@@ -122,19 +139,31 @@ def poc_agent(state: AgentState):
     # CVEs
     for line in lines:
         if "CVE-" in line:
-            findings.append(f"[HIGH] Potential CVE Detected → {line.strip()}")
+            # Extract CVE ID
+            cve_match = re.search(r"CVE-\d{4}-\d+", line)
+            cve_id = cve_match.group(0) if cve_match else "Unknown-CVE"
+
+            # Extract severity
+            severity_match = re.search(r"\[(low|medium|high|critical)\]", line.lower())
+            severity = severity_match.group(1).upper() if severity_match else "MEDIUM"
+
+            findings.append(
+                f"[{severity}] {cve_id} detected -> verify & patch | PoC: run 'nmap -p 22 --script ssh2-enum-algos {target}'"
+            )
 
     # Apache Detection
     if "apache" in report.lower():
         findings.append("[INFO] Apache server detected — verify version is up-to-date")
 
     # Open Ports Insight
-    if "open" in report.lower():
-        findings.append("[INFO] Open ports detected — review exposed services")
+    if "22" in report:
+        findings.append("[INFO] Port 22 (SSH) exposed — restrict via firewall if not needed")
 
     # Fallback
     if not findings:
         findings.append("[INFO] No actionable PoC validations performed.")
+
+    findings = sort_findings(findings)
 
     return {
         "poc_results": findings  # structured output
@@ -178,5 +207,5 @@ if __name__ == "__main__":
     print(final_output["vulnerabilities_report"])
 
     print("\n--- PoC Validation ---")
-for item in final_output["poc_results"]:
-    print(item)
+    for item in final_output["poc_results"]:
+        print(item)
